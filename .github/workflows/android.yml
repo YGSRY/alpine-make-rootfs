@@ -1,0 +1,82 @@
+name: Build Alpine Linux ARM64 for Android
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+env:
+  ALPINE_VERSION: "3.19"  # 推荐使用 LTS 版本
+  ARCH: "aarch64"
+
+jobs:
+  build-android-rootfs:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Setup QEMU
+      uses: docker/setup-qemu-action@v3
+      with:
+        platforms: arm64
+
+    - name: Build Android-compatible rootfs
+      run: |
+        mkdir -p rootfs
+        docker run --rm --platform linux/arm64 \
+          -v $(pwd)/rootfs:/rootfs \
+          alpine:${{ env.ALPINE_VERSION }} \
+          sh -c '
+          # 安装最小系统 + 必要工具
+          apk add --no-cache \
+            alpine-base \
+            busybox-static \
+            proot \
+            openssh \
+            termux-exec
+
+          # 创建Android专用目录结构
+          mkdir -p /rootfs/{dev,proc,sys,tmp,data,storage,system,apex}
+          chmod 1777 /rootfs/tmp
+
+          # 配置基础文件
+          echo "nameserver 8.8.8.8" > /rootfs/etc/resolv.conf
+          echo "127.0.0.1 localhost" > /rootfs/etc/hosts
+          echo "alpine-android" > /rootfs/etc/hostname
+
+          # 复制必要文件
+          cp -a /bin /etc /lib /root /sbin /usr /rootfs/
+          rm -f /rootfs/bin/ash /rootfs/bin/sh
+          ln -s /bin/busybox /rootfs/bin/sh
+          ln -s /bin/busybox /rootfs/bin/ash
+
+          # 修复设备节点
+          mknod -m 666 /rootfs/dev/null c 1 3
+          mknod -m 666 /rootfs/dev/urandom c 1 9
+          '
+
+    - name: Create deployment package
+      run: |
+        cd rootfs
+        cat > ../install-alpine-android <<'EOF'
+        #!/bin/sh
+        # Auto-install script for Termux
+        pkg install proot tar -y
+        mkdir -p ~/alpine
+        tar -xzf alpine-android-rootfs.tar.gz -C ~/alpine
+        echo 'proot -r ~/alpine -b /data -b /storage -w /root /bin/sh' > ~/alpine/start
+        chmod +x ~/alpine/start
+        echo "Install complete! Run: ./alpine/start"
+        EOF
+
+        tar -czvf ../alpine-android-rootfs.tar.gz .
+        chmod +x ../install-alpine-android
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: alpine-android-${{ env.ARCH }}
+        path: |
+          alpine-android-rootfs.tar.gz
+          install-alpine-android
